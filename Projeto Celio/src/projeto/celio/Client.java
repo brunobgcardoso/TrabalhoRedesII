@@ -8,7 +8,10 @@ import java.awt.event.WindowAdapter;
 import java.awt.event.WindowEvent;
 import java.io.*;
 import java.net.*;
+import java.util.LinkedList;
 import java.util.StringTokenizer;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 public class Client {
 
@@ -48,6 +51,10 @@ public class Client {
 	static String VideoFileName; //video file to request to the server
 	int RTSPSeqNb = 0; //Sequence number of RTSP messages within the session
 	int RTSPid = 0; //ID of the RTSP session (given by the RTSP Server)
+
+	final Queue<Frame> frameBuffer;
+	final Thread receiveThread;
+	int lastDisplayedSequenceNumber;
 
 	final static String CRLF = "\r\n";
 
@@ -95,11 +102,17 @@ public class Client {
 		f.setSize(new Dimension(390, 370));
 		f.setVisible(true);
 
+		//init unlimited frame buffer
+		frameBuffer = new ConcurrentLinkedQueue<>();
+		lastDisplayedSequenceNumber = 0;
+
 		//init timer
 		//--------------------------
-		timer = new Timer(20, new timerListener());
+		timer = new Timer(30, new timerListener());
 		timer.setInitialDelay(0);
 		timer.setCoalesce(true);
+
+		receiveThread = new Thread(new ReceiveThread());
 
 		//allocate enough memory for the buffer used to receive data from the server
 		buf = new byte[15000];
@@ -201,7 +214,9 @@ public class Client {
 				else {
 					//change RTSP state and print out new state
 					state = PLAYING;
-					 System.out.println("New RTSP state: PLAYING");
+					System.out.println("New RTSP state: PLAYING");
+
+					receiveThread.start();
 
 					//start the timer
 					timer.start();
@@ -278,45 +293,65 @@ public class Client {
 
 	class timerListener implements ActionListener {
 		public void actionPerformed(ActionEvent e) {
-
-			//Construct a DatagramPacket to receive data from the UDP socket
-			rcvdp = new DatagramPacket(buf, buf.length);
-
-			try {
-				//receive the DP from the socket:
-				RTPsocket.receive(rcvdp);
-
-				//create an RTPpacket object from the DP
-				RTPpacket rtp_packet = new RTPpacket(rcvdp.getData(), rcvdp.getLength());
-
-				//print important header fields of the RTP packet received:
-				System.out.println("Got RTP packet with SeqNum # " + rtp_packet.getsequencenumber() + " TimeStamp " + rtp_packet.gettimestamp() + " ms, of type " + rtp_packet.getpayloadtype() + " with size " + rtp_packet.getpayload_length());
-
-				//print header bitstream:
-				rtp_packet.printheader();
-
-				//get the payload bitstream from the RTPpacket object
-				int payload_length = rtp_packet.getpayload_length();
-				byte[] payload = new byte[payload_length];
-				if (rtp_packet.getsequencenumber() % 3 == 0) {
-					for (int i = 0; i < payload_length; i++) {
-						payload[i] = 0;
-					}
-				} else {
-					rtp_packet.getpayload(payload);
+			if (frameBuffer.size() > 0) {
+				Frame frame = frameBuffer.element();
+				if (frame.sequenceNumber > lastDisplayedSequenceNumber+1) {
+					System.out.println("Perdeu seqnum: " + lastDisplayedSequenceNumber+1);
+					//image = reconstroi a partir do frame
 				}
+				else {
+					// display the image as an ImageIcon object
+					icon = new ImageIcon(frameBuffer.poll().image);
+					iconLabel.setIcon(icon);
+				}
+				lastDisplayedSequenceNumber++;
+			}
+		}
+	}
 
-				//get an Image object from the payload bitstream
-				Toolkit toolkit = Toolkit.getDefaultToolkit();
-				Image image = toolkit.createImage(payload, 0, payload_length);
+	private class ReceiveThread extends Thread {
+		public void run() {
+			while (state == PLAYING) {
+				//Construct a DatagramPacket to receive data from the UDP socket
+				rcvdp = new DatagramPacket(buf, buf.length);
 
-				//display the image as an ImageIcon object
-				icon = new ImageIcon(image);
-				iconLabel.setIcon(icon);
-			} catch (InterruptedIOException iioe) {
-				//System.out.println("Nothing to read");
-			} catch (IOException ioe) {
-				System.out.println("Exception caught: " + ioe);
+				try {
+					//receive the DP from the socket:
+					RTPsocket.receive(rcvdp);
+
+					//create an RTPpacket object from the DP
+					RTPpacket rtp_packet = new RTPpacket(rcvdp.getData(), rcvdp.getLength());
+
+					//print important header fields of the RTP packet received:
+					System.out.println("Got RTP packet with SeqNum # " + rtp_packet.getsequencenumber() + " TimeStamp " + rtp_packet.gettimestamp() + " ms, of type " + rtp_packet.getpayloadtype() + " with size " + rtp_packet.getpayload_length());
+
+					//print header bitstream:
+					rtp_packet.printheader();
+
+					//get the payload bitstream from the RTPpacket object
+					int payload_length = rtp_packet.getpayload_length();
+					byte[] payload = new byte[payload_length];
+					if (rtp_packet.getsequencenumber() % 3 == 0) {
+						for (int i = 0; i < payload_length; i++) {
+							payload[i] = 0;
+						}
+					} else {
+						rtp_packet.getpayload(payload);
+						Toolkit toolkit = Toolkit.getDefaultToolkit();
+						Image image = toolkit.createImage(payload, 0, payload_length);
+						frameBuffer.add(new Frame(image, rtp_packet.getsequencenumber()));
+					}
+//					rtp_packet.getpayload(payload);
+
+					//get an Image object from the payload bitstream
+
+
+					//add image in buffer
+				} catch (InterruptedIOException iioe) {
+					//System.out.println("Nothing to read");
+				} catch (IOException ioe) {
+					System.out.println("Exception caught: " + ioe);
+				}
 			}
 		}
 	}
